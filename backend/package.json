@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
-    "build": "prisma generate && prisma db push --accept-data-loss",
+    "postinstall": "node scripts/deploy-db.js",
+    "build": "echo 'Build complete (postinstall already ran db bootstrap)'",
     "import": "node src/importer/runImport.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
@@ -23,9 +24,8 @@
     "csv-parse": "^5.6.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1"
-  },
-  "devDependencies": {
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.3",
     "prisma": "^6.9.0"
   }
 }
