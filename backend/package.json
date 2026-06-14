@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
-    "build": "prisma generate && prisma db push",
+    "build": "node scripts/deploy-db.js",
     "import": "node src/importer/runImport.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
