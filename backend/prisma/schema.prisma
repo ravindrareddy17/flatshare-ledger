@@ -1,0 +1,179 @@
+// Prisma schema for the Flatshare Ledger app
+// Target DB: PostgreSQL (see DECISIONS.md for why)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Person: anyone who has ever appeared as a payer or a split participant.
+// People can become inactive (moved out) without deleting their history.
+// ---------------------------------------------------------------------------
+model Person {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  joinedAt  DateTime?
+  leftAt    DateTime?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  expensesPaid Expense[]      @relation("PaidBy")
+  splits       ExpenseSplit[]
+  settlementsSent     Settlement[] @relation("SettlementFrom")
+  settlementsReceived Settlement[] @relation("SettlementTo")
+
+  @@map("people")
+}
+
+// ---------------------------------------------------------------------------
+// Import: one row per CSV ingestion run. Drives the "Import Report".
+// ---------------------------------------------------------------------------
+model Import {
+  id              Int      @id @default(autoincrement())
+  filename        String
+  importedAt      DateTime @default(now())
+  totalRows       Int
+  expenseCount    Int
+  settlementCount Int
+  skippedCount    Int
+  anomalyCount    Int
+
+  expenses    Expense[]
+  settlements Settlement[]
+  anomalies   AnomalyRecord[]
+
+  @@map("imports")
+}
+
+enum SplitType {
+  EQUAL
+  PERCENTAGE
+  SHARE
+  UNEQUAL
+}
+
+// ---------------------------------------------------------------------------
+// Expense: a shared cost. Always has at least one ExpenseSplit row per
+// participant describing how much of the amount they owe.
+// ---------------------------------------------------------------------------
+model Expense {
+  id          Int       @id @default(autoincrement())
+  importId    Int?
+  sourceRow   Int?
+
+  date        DateTime
+  description String
+  notes       String?
+
+  paidById    Int?
+  paidBy      Person?   @relation("PaidBy", fields: [paidById], references: [id])
+
+  // Original amount/currency exactly as recorded
+  amountOriginal   Decimal @db.Decimal(12, 2)
+  currencyOriginal String  @default("INR")
+
+  // Normalised amount in INR, used for all balance math.
+  // Equal to amountOriginal when currencyOriginal == "INR".
+  amountInInr      Decimal @db.Decimal(12, 2)
+  exchangeRateUsed Decimal? @db.Decimal(12, 4)
+
+  splitType SplitType
+
+  // Flags set by the importer for rows that needed special handling
+  isDuplicateOf  Int?     // id of the Expense this looks like a duplicate of
+  flagged        Boolean  @default(false)
+  excludeFromBalances Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  import Import? @relation(fields: [importId], references: [id])
+  splits ExpenseSplit[]
+
+  @@map("expenses")
+}
+
+// ---------------------------------------------------------------------------
+// ExpenseSplit: how much of one Expense one Person owes.
+// shareValue keeps the *raw* input (percentage points, share units, or the
+// unequal amount) for auditability; amountOwedInInr is the resolved figure
+// used for balance calculations.
+// ---------------------------------------------------------------------------
+model ExpenseSplit {
+  id     Int @id @default(autoincrement())
+
+  expenseId Int
+  expense   Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  personId Int
+  person   Person @relation(fields: [personId], references: [id])
+
+  shareValue      Decimal? @db.Decimal(12, 4) // raw % / units / unequal amount, if given
+  amountOwedInInr Decimal  @db.Decimal(12, 2)
+
+  @@unique([expenseId, personId])
+  @@map("expense_splits")
+}
+
+// ---------------------------------------------------------------------------
+// Settlement: direct person-to-person payments (e.g. "Rohan paid Aisha back",
+// or a deposit handover). These move money between two people directly and
+// are NOT split among the group.
+// ---------------------------------------------------------------------------
+model Settlement {
+  id       Int @id @default(autoincrement())
+  importId Int?
+  sourceRow Int?
+
+  date   DateTime
+  notes  String?
+
+  fromPersonId Int
+  fromPerson   Person @relation("SettlementFrom", fields: [fromPersonId], references: [id])
+
+  toPersonId Int
+  toPerson   Person @relation("SettlementTo", fields: [toPersonId], references: [id])
+
+  amountOriginal   Decimal @db.Decimal(12, 2)
+  currencyOriginal String  @default("INR")
+  amountInInr      Decimal @db.Decimal(12, 2)
+  exchangeRateUsed Decimal? @db.Decimal(12, 4)
+
+  createdAt DateTime @default(now())
+  import    Import?  @relation(fields: [importId], references: [id])
+
+  @@map("settlements")
+}
+
+enum AnomalySeverity {
+  INFO
+  WARNING
+  ERROR
+}
+
+// ---------------------------------------------------------------------------
+// AnomalyRecord: one row per data problem found during import, with the
+// action the importer took. Powers both SCOPE.md and the Import Report.
+// ---------------------------------------------------------------------------
+model AnomalyRecord {
+  id       Int @id @default(autoincrement())
+  importId Int
+  import   Import @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  sourceRow   Int
+  field       String?
+  anomalyType String
+  severity    AnomalySeverity
+  rawValue    String?
+  description String
+  actionTaken String
+
+  createdAt DateTime @default(now())
+
+  @@map("anomaly_records")
+}
