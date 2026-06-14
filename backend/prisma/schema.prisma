@@ -1,13 +1,20 @@
 // Prisma schema for the Flatshare Ledger app
-// Using SQLite for local development (no external DB required)
+//
+// LOCAL DEV:  DATABASE_URL="file:./dev.db"  (SQLite, zero-config)
+// PRODUCTION: DATABASE_URL="postgresql://..."  (Neon / Render Postgres)
+//
+// The provider is set to "postgresql" for production (Render + Neon).
+// For local dev, override to SQLite by setting DATABASE_URL to a file: URL
+// AND changing provider to "sqlite" — or just use a local Postgres instance.
 
 generator client {
   provider      = "prisma-client-js"
   engineType    = "binary"
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
+
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -69,20 +76,20 @@ model Expense {
   paidBy      Person?   @relation("PaidBy", fields: [paidById], references: [id])
 
   // Original amount/currency exactly as recorded
-  amountOriginal   Decimal
-  currencyOriginal String  @default("INR")
+  amountOriginal   Decimal  @db.Decimal(12, 2)
+  currencyOriginal String   @default("INR")
 
   // Normalised amount in INR, used for all balance math.
   // Equal to amountOriginal when currencyOriginal == "INR".
-  amountInInr      Decimal
-  exchangeRateUsed Decimal?
+  amountInInr      Decimal  @db.Decimal(12, 2)
+  exchangeRateUsed Decimal? @db.Decimal(10, 4)
 
   splitType String  // EQUAL | PERCENTAGE | SHARE | UNEQUAL
 
   // Flags set by the importer for rows that needed special handling
-  isDuplicateOf  Int?     // id of the Expense this looks like a duplicate of
-  flagged        Boolean  @default(false)
-  excludeFromBalances Boolean @default(false)
+  isDuplicateOf       Int?     // id of the Expense this looks like a duplicate of
+  flagged             Boolean  @default(false)
+  excludeFromBalances Boolean  @default(false)
 
   createdAt DateTime @default(now())
 
@@ -107,8 +114,8 @@ model ExpenseSplit {
   personId Int
   person   Person @relation(fields: [personId], references: [id])
 
-  shareValue      Decimal? // raw % / units / unequal amount, if given
-  amountOwedInInr Decimal
+  shareValue      Decimal? @db.Decimal(12, 4) // raw % / units / unequal amount, if given
+  amountOwedInInr Decimal  @db.Decimal(12, 2)
 
   @@unique([expenseId, personId])
   @@map("expense_splits")
@@ -120,8 +127,8 @@ model ExpenseSplit {
 // are NOT split among the group.
 // ---------------------------------------------------------------------------
 model Settlement {
-  id       Int @id @default(autoincrement())
-  importId Int?
+  id        Int  @id @default(autoincrement())
+  importId  Int?
   sourceRow Int?
 
   date   DateTime
@@ -133,10 +140,10 @@ model Settlement {
   toPersonId Int
   toPerson   Person @relation("SettlementTo", fields: [toPersonId], references: [id])
 
-  amountOriginal   Decimal
-  currencyOriginal String  @default("INR")
-  amountInInr      Decimal
-  exchangeRateUsed Decimal?
+  amountOriginal   Decimal  @db.Decimal(12, 2)
+  currencyOriginal String   @default("INR")
+  amountInInr      Decimal  @db.Decimal(12, 2)
+  exchangeRateUsed Decimal? @db.Decimal(10, 4)
 
   createdAt DateTime @default(now())
   import    Import?  @relation(fields: [importId], references: [id])
@@ -149,7 +156,7 @@ model Settlement {
 // action the importer took. Powers both SCOPE.md and the Import Report.
 // ---------------------------------------------------------------------------
 model AnomalyRecord {
-  id       Int @id @default(autoincrement())
+  id       Int    @id @default(autoincrement())
   importId Int
   import   Import @relation(fields: [importId], references: [id], onDelete: Cascade)
 

@@ -10,9 +10,11 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
+    "build": "prisma generate && prisma migrate deploy",
     "import": "node src/importer/runImport.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
     "test:import": "node src/importer/runImport.js --dry-run"
   },
   "dependencies": {
