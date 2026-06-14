@@ -1,5 +1,5 @@
 // Prisma schema for the Flatshare Ledger app
-// Target DB: PostgreSQL (see DECISIONS.md for why)
+// Using SQLite for local development (no external DB required)
 
 generator client {
   provider      = "prisma-client-js"
@@ -7,7 +7,7 @@ generator client {
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -52,13 +52,6 @@ model Import {
   @@map("imports")
 }
 
-enum SplitType {
-  EQUAL
-  PERCENTAGE
-  SHARE
-  UNEQUAL
-}
-
 // ---------------------------------------------------------------------------
 // Expense: a shared cost. Always has at least one ExpenseSplit row per
 // participant describing how much of the amount they owe.
@@ -76,15 +69,15 @@ model Expense {
   paidBy      Person?   @relation("PaidBy", fields: [paidById], references: [id])
 
   // Original amount/currency exactly as recorded
-  amountOriginal   Decimal @db.Decimal(12, 2)
+  amountOriginal   Decimal
   currencyOriginal String  @default("INR")
 
   // Normalised amount in INR, used for all balance math.
   // Equal to amountOriginal when currencyOriginal == "INR".
-  amountInInr      Decimal @db.Decimal(12, 2)
-  exchangeRateUsed Decimal? @db.Decimal(12, 4)
+  amountInInr      Decimal
+  exchangeRateUsed Decimal?
 
-  splitType SplitType
+  splitType String  // EQUAL | PERCENTAGE | SHARE | UNEQUAL
 
   // Flags set by the importer for rows that needed special handling
   isDuplicateOf  Int?     // id of the Expense this looks like a duplicate of
@@ -114,8 +107,8 @@ model ExpenseSplit {
   personId Int
   person   Person @relation(fields: [personId], references: [id])
 
-  shareValue      Decimal? @db.Decimal(12, 4) // raw % / units / unequal amount, if given
-  amountOwedInInr Decimal  @db.Decimal(12, 2)
+  shareValue      Decimal? // raw % / units / unequal amount, if given
+  amountOwedInInr Decimal
 
   @@unique([expenseId, personId])
   @@map("expense_splits")
@@ -140,21 +133,15 @@ model Settlement {
   toPersonId Int
   toPerson   Person @relation("SettlementTo", fields: [toPersonId], references: [id])
 
-  amountOriginal   Decimal @db.Decimal(12, 2)
+  amountOriginal   Decimal
   currencyOriginal String  @default("INR")
-  amountInInr      Decimal @db.Decimal(12, 2)
-  exchangeRateUsed Decimal? @db.Decimal(12, 4)
+  amountInInr      Decimal
+  exchangeRateUsed Decimal?
 
   createdAt DateTime @default(now())
   import    Import?  @relation(fields: [importId], references: [id])
 
   @@map("settlements")
-}
-
-enum AnomalySeverity {
-  INFO
-  WARNING
-  ERROR
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +156,7 @@ model AnomalyRecord {
   sourceRow   Int
   field       String?
   anomalyType String
-  severity    AnomalySeverity
+  severity    String  // INFO | WARNING | ERROR
   rawValue    String?
   description String
   actionTaken String

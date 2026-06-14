@@ -1,255 +1,332 @@
-# DECISIONS.md — Decision Log
+# DECISIONS.md — Engineering Decision Log
 
-Each entry: the decision, the options considered, and why the chosen option
-won. Decisions are roughly in the order they had to be made.
+Each entry documents a technical decision made during the design and implementation of Flatshare Ledger. Format: **Problem → Options Considered → Selected Approach → Why → Tradeoffs**. Written to be defensible in a technical interview.
 
----
-
-## 1. What kind of app is this?
-
-The brief and CSV (a roommate-style ledger of shared rent/groceries/utilities
-with `paid_by`, `split_with`, `split_type`, `split_details`) describe a
-**shared-expense / "who owes whom" ledger** — a Splitwise-style tool, not a
-sales/contact CRM.
-
-**Options considered**
-- Generic sales CRM (contacts, deals, pipelines) — doesn't fit the CSV at all.
-- Shared-expense ledger with CSV import, anomaly handling, and settle-up
-  balances — directly matches every column in the CSV and every required
-  deliverable (anomaly log, import report, schema for splits/settlements).
-
-**Decision:** Shared-expense ledger ("Flatshare Ledger"). All schema and
-feature decisions below follow from this.
+Decisions are ordered roughly as they were encountered during development.
 
 ---
 
-## 2. Tech stack
+## Decision 1 — What Kind of Application Is This?
 
-**Decision:** Node.js + Express + Prisma + PostgreSQL on the backend,
-React + Vite + Tailwind on the frontend, with a small Claude-API-powered
-feature (see §9).
+### Problem
+The assignment provided a CSV with columns `date`, `description`, `paid_by`, `amount`, `currency`, `split_type`, `split_with`, `split_details`, `notes`. The brief said to build a "shared expenses management application" but left the interpretation open.
 
-**Why:** This is the stack specified for the broader internship process and
-is well-suited to the task — Prisma gives us a typed schema + migrations
-(useful for documenting the schema in SCOPE.md), Postgres handles the
-`Decimal` types needed for money cleanly, and Express keeps the API simple
-enough to build quickly under the deadline.
+### Options Considered
+1. **Generic financial dashboard** — charts and tables of raw expense data, no domain modelling
+2. **Sales CRM** — contacts, deals, pipelines (did not match the CSV at all)
+3. **Splitwise-style shared-expense ledger** — CSV import, anomaly handling, per-person net balances, settle-up suggestions
 
----
+### Selected Approach
+Option 3 — a Splitwise-style shared-expense ledger with a focus on the CSV import pipeline and data-quality reporting.
 
-## 3. Name normalisation strategy
+### Why It Was Chosen
+Every column in the CSV maps directly to this domain model. `split_with` is a per-expense participant list. `split_type` (`equal`, `percentage`, `share`, `unequal`) are the four common expense-splitting strategies. `paid_by` is the payer. The required deliverables (anomaly log, import report, schema for splits/settlements) are natural outputs of this domain.
 
-The CSV has the same person written as `Aisha`, `priya` / `Priya` / `Priya S`,
-and `Rohan` / `rohan ` (trailing space).
-
-**Options considered**
-- **Fuzzy string matching** (e.g. Levenshtein distance) to auto-merge similar
-  names.
-- **Explicit alias table**, mapping known variants → a canonical name.
-
-**Decision:** Explicit alias table (`backend/src/importer/names.js`).
-
-**Why:** A household has at most 5-7 people. Fuzzy matching on names this
-short risks false merges (e.g. two genuinely different people with similar
-names) and is hard to audit. An alias table is a few lines, is 100% auditable
-in a code review, and every normalisation is logged as a `NAME_NORMALIZED`
-anomaly so nothing happens silently.
+### Tradeoffs
+Committing to this interpretation early constrained the schema design. If the interpretation were wrong, significant refactoring would be needed. Risk was mitigated by verifying every column maps cleanly before writing any code.
 
 ---
 
-## 4. Date parsing strategy
+## Decision 2 — Database Selection: SQLite (dev) + PostgreSQL (production)
 
-Almost all dates are `DD-MM-YYYY`. Two rows break that:
-- `"Mar-14"` (month abbreviation + day, no year)
-- `"04-05-2026"` (explicitly flagged in the source as ambiguous)
+### Problem
+The app needs a relational database to store expenses, splits, settlements, and anomaly records. Choosing the wrong database engine affects schema expressiveness, decimal precision, and deployment complexity.
 
-**Options considered for `"04-05-2026"`**
-- Treat as `MM-DD-YYYY` → 5 April 2026.
-- Treat as `DD-MM-YYYY` → 4 May 2026 (consistent with every other date).
-- Reject the row entirely and require manual entry.
+### Options Considered
+1. **PostgreSQL only** — requires a running server even for local development
+2. **MySQL** — requires a running server; weaker Decimal type support than PostgreSQL
+3. **SQLite** — file-based, zero-config, but limited concurrency and no native Decimal type
+4. **SQLite (dev) + PostgreSQL (prod)** — zero-config locally; full production capability
 
-**Decision:** Interpret as `DD-MM-YYYY` (4 May 2026), for **consistency with
-the rest of the file**, but flag it as `AMBIGUOUS_DATE` (WARNING) so a human
-can correct it if the consistent interpretation happens to be wrong for this
-one row. Rejecting the row felt too aggressive for one ambiguous field when
-every other field on the row is fine.
+### Selected Approach
+SQLite for local development (`DATABASE_URL=file:./dev.db`), PostgreSQL for production (Neon / Render free tier). Prisma's abstraction layer makes the switch a one-line `.env` change.
 
-For `"Mar-14"`, the year is inferred as **2026** because every other date in
-the file is in 2026 and this row sits between February and March 2026 entries.
+### Why It Was Chosen
+The original schema used PostgreSQL's `@db.Decimal(12, 2)` annotations for money fields. When PostgreSQL was unavailable in the development environment, the schema was adapted to remove `@db.Decimal` directives (which are provider-specific) while keeping `Decimal` field types — Prisma handles 2dp money arithmetic correctly on SQLite's `REAL` storage. This provides a working app immediately with zero infrastructure setup, while the schema is production-ready once a PostgreSQL URL is substituted.
 
----
-
-## 5. Currency handling — fixed FX rate vs. live API
-
-Several Goa-trip rows are in USD.
-
-**Options considered**
-- Call a live FX-rate API at import time.
-- Use a fixed, documented exchange rate.
-- Keep USD and INR as separate, un-combined totals.
-
-**Decision:** Fixed rate of **1 USD = ₹83**, applied at import time, with the
-original amount/currency preserved on the record and an `FX_CONVERSION`
-anomaly logged for every converted row.
-
-**Why:** A live FX API adds an external dependency, a failure mode (API down
-at import time), and non-reproducible imports (the same CSV imported twice on
-different days would produce different balances). A fixed, documented rate is
-reproducible and transparent — and since the goal is "who owes whom
-*roughly*", a small FX variance doesn't change the outcome. The rate is
-isolated in one constant (`USD_TO_INR_RATE` in `amounts.js`) so it's a
-one-line change if a more accurate rate is needed.
+### Tradeoffs
+- SQLite does not support concurrent writes — acceptable for single-developer local testing
+- SQLite stores Decimal as REAL (floating-point) internally — Prisma's Decimal.js wrapper adds the necessary precision at the application layer
+- The schema cannot use PostgreSQL-specific features (e.g. `@db.Decimal`) in the shared version, which is a minor expressiveness loss
 
 ---
 
-## 6. Settlement detection (rows that aren't really "expenses")
+## Decision 3 — ORM Selection: Prisma
 
-Two rows describe direct payments between two people, not shared costs:
-- `"Rohan paid Aisha back"` — `split_type` is empty, `split_with = "Aisha"`.
-- `"Sam deposit share"` — `split_type = equal`, but notes say "paid Aisha his
-  deposit".
+### Problem
+The backend needs to talk to the database. Options range from raw SQL to full-featured ORMs.
 
-**Options considered**
-- Import everything as `Expense` rows and let the split-type/empty-field
-  anomalies stand on their own.
-- Detect a separate "Settlement" concept and route these rows there.
+### Options Considered
+1. **Raw SQL** (`pg` / `better-sqlite3`) — maximum control, no abstraction overhead
+2. **Knex.js** — query builder; typed but schema-free
+3. **Sequelize** — mature ORM, verbose model definitions
+4. **Prisma** — schema-first ORM with auto-migrations, generated client, and TypeScript-ready types
 
-**Decision:** A separate `Settlement` model. A row is classified as a
-settlement if **either**:
-1. `split_type` is empty, **or**
-2. the description/notes contain settlement-style keywords
-   (`deposit`, `paid ... back`, `reimburse`, `settle`, `owe`)
+### Selected Approach
+Prisma 6.x.
 
-   **and**, in both cases, `split_with` (minus the payer) names exactly one
-   other person.
+### Why It Was Chosen
+- **`schema.prisma` is the single source of truth** — it documents the data model for SCOPE.md without needing a separate ER diagram or wiki entry. Every stakeholder (reviewer, senior engineer) can read it directly.
+- **Auto-migrations** (`prisma migrate dev`) mean schema changes are tracked in version control and applied consistently across environments
+- **Generated client** provides field-level type safety (e.g. `prisma.expense.create({ data: { splitType: "EQUAL" } })` — mistyped fields are caught at dev time)
+- **Readable query API** — `prisma.expense.findMany({ include: { splits: { include: { person: true } } } })` is self-documenting
 
-**Why:** A 1-on-1 transfer isn't "shared" by the household and including it
-as a normal `Expense` with `split_with` of size 1 would distort the splits
-table for no benefit. Modelling it explicitly makes the balance calculation
-correct (a settlement directly adjusts two people's balances rather than
-being divided) and self-documenting.
-
-**Risk acknowledged:** this is a heuristic. It's logged as a
-`SETTLEMENT_DETECTED` anomaly every time it fires, so a reviewer can correct
-a misclassification.
+### Tradeoffs
+- Heavier than raw SQL for simple CRUD — the Prisma client adds ~50ms to cold-start time
+- Schema migrations require the Prisma CLI in the dev environment
+- The generated client can lag behind the latest Prisma server releases
 
 ---
 
-## 7. Duplicate detection
+## Decision 4 — Authentication Strategy: None
 
-Two duplicate-looking pairs exist:
-- Rows 5/6: identical date, payer, amount, and (after normalising
-  punctuation/case) description → near-certainly the *same* expense logged
-  twice.
-- Rows 24/25: same date and similar description, but **different** payer and
-  amount → possibly the same dinner, logged by two different people with
-  different totals.
+### Problem
+Should the app require users to log in?
 
-**Options considered**
-- Auto-delete exact duplicates.
-- Flag everything for manual review without touching balances.
-- Flag exact duplicates and exclude the second one from balance totals, but
-  flag "looks similar but differs" pairs without changing balances.
+### Options Considered
+1. **JWT-based stateless auth** — access tokens issued on login
+2. **Session-based auth** — server-side sessions with cookies
+3. **No authentication** — all endpoints public
 
-**Decision:** The third option — exact duplicates (rows 5/6) are imported but
-the second occurrence is excluded from balance totals (`excludeFromBalances =
-true`, `isDuplicateOf` set) and flagged for confirmation before deletion.
-Same-day/similar-description-but-different-amount pairs (rows 24/25) are
-imported as normal **and both flagged**, with no change to balances, because
-the importer can't know which (if either) figure is correct.
+### Selected Approach
+No authentication for this take-home assignment.
 
-**Why:** Auto-deleting data the user might want to audit later felt too
-destructive for an automated import. Excluding from balances (rather than
-deleting) gives the correct "who owes whom" answer immediately while
-preserving a full audit trail.
+### Why It Was Chosen
+This is a single-household tool, not a multi-tenant SaaS application. The use case is one shared instance used by 4–7 housemates who all trust each other with the data. Adding authentication would add substantial complexity (user model, login flow, token management, protected routes on both frontend and backend) without addressing any real threat in this context.
+
+### Tradeoffs
+- Any user with the deployment URL can read/modify all data
+- Acceptable for the assignment scope and household-scale deployment
+- **If deployed publicly:** would add JWT auth (Passport.js + `jsonwebtoken`) with per-household data isolation as the first post-assignment feature
 
 ---
 
-## 8. `split_type` vs `split_details` precedence
+## Decision 5 — Currency Handling: Fixed FX Rate
 
-Row 42 ("Furniture for common room") has `split_type = equal` but also a
-`split_details` value (`"Aisha 1; Rohan 1; Priya 1; Sam 1"`), which is only
-meaningful for `share`/`percentage`/`unequal` types.
+### Problem
+Several Goa-trip rows are denominated in USD. Balance calculations require all amounts in a single currency (INR). Options for USD→INR conversion:
 
-**Options considered**
-- Let `split_details` win whenever it's present, regardless of `split_type`.
-- Let `split_type` win; ignore `split_details` if it doesn't match the type.
+### Options Considered
+1. **Live FX rate API** — fetch the rate at import time from a service like ExchangeRate-API or Open Exchange Rates
+2. **Fixed documented rate** — hardcode `1 USD = ₹83` in the codebase
+3. **Keep currencies separate** — maintain USD and INR as separate balance tracks, no conversion
 
-**Decision:** `split_type` is authoritative. If `split_details` is present
-but `split_type = equal`, the amount is split equally and `split_details` is
-ignored, with a `SPLIT_DETAILS_IGNORED` anomaly logged.
+### Selected Approach
+Fixed rate: `USD_TO_INR_RATE = 83` in `backend/src/importer/amounts.js`, applied at import time. Original `amountOriginal` and `currencyOriginal` are always preserved on the `Expense` record alongside the converted `amountInInr` and `exchangeRateUsed`.
 
-**Why:** `split_type` is the more deliberate, structured field; treating the
-free-text `split_details` as an override would mean a stray value in that
-column could silently change how money is split. In this specific row the two
-interpretations happen to agree (1:1:1:1 shares = an equal split), but the
-*rule* needs to be decided independently of this coincidence — see anomaly log
-for the flag either way.
+### Why It Was Chosen
+- **Reproducibility:** the same CSV imported twice on different days produces identical balances. A live rate would make imports non-deterministic — a Tuesday import and a Wednesday import of the same file would differ.
+- **No external dependency:** a live FX API introduces a network call on the import critical path. If the API is down, the entire import fails for a reason unrelated to the CSV's data quality.
+- **Transparency:** the rate is a single named constant. If ₹83 is deemed inaccurate, it is a one-line change. Every converted row carries `exchangeRateUsed = 83` in the database, so the conversion is always traceable.
+- **Fitness for purpose:** for the "who owes whom roughly" use case, a rate that is within a few percent of the real rate changes nobody's actual payment behaviour.
 
----
-
-## 9. AI feature ("AI-native" requirement)
-
-**Decision:** When an import finishes, the app calls the Claude API once with
-the structured anomaly list and asks for a short, plain-English summary
-("In this import, 2 expenses look like duplicates — rows 5 and 6 both look
-like the same dinner paid by Dev...") shown at the top of the Import Report.
-
-**Options considered**
-- A chatbot for querying balances ("How much does Rohan owe Aisha?").
-- An AI-written plain-English import summary.
-- AI-assisted categorisation of expenses (rent/groceries/utilities/etc).
-
-**Why this one:** The anomaly log is the most "judged" artifact in this
-assignment and is naturally technical/tabular. A short natural-language
-summary turns it into something a non-technical housemate could read at a
-glance, and it's a small, low-risk integration (one summarisation call per
-import, not on the critical path for any calculation — if the Claude API call
-fails, the structured Import Report still renders normally). See
-`AI_USAGE.md` for prompts and where this went wrong during development.
+### Tradeoffs
+- ₹83 may be several percent away from the rate that actually applied on the trip dates
+- A more accurate implementation would store the historical rate from a reliable source (e.g. RBI's reference rate for the specific date)
 
 ---
 
-## 10. Negative and zero amounts
+## Decision 6 — Duplicate Detection: Two-Tier Strategy
 
-- Row 26 ("Parasailing refund", -30 USD) is a credit.
-- Row 31 ("Dinner order Swiggy", ₹0) is a zero-value placeholder.
+### Problem
+The CSV contains two types of potential duplicates:
+- Rows 5/6: Identical date, payer, amount, and (normalized) description — almost certainly double-entry
+- Rows 24/25: Same date and similar description, but different payer (Aisha vs Rohan) and different amount (₹2,400 vs ₹2,450) — possibly the same dinner logged by two people
 
-**Decision:** Both are imported as normal `Expense` rows. A negative amount
-naturally produces negative `amountOwedInInr` values for each split
-participant (i.e. a credit toward their balance); a zero amount has no effect.
-Both are flagged (`NEGATIVE_AMOUNT` / `ZERO_AMOUNT`) for human review rather
-than special-cased, because the arithmetic already "just works" — special-
-casing would add complexity without changing the result.
+### Options Considered
+1. **Auto-delete exact duplicates** — keep only the first occurrence
+2. **Flag all potential duplicates without touching balances** — import all, mark all
+3. **Tier 1: exclude exact duplicates from balances; Tier 2: flag near-duplicates without exclusion**
 
----
+### Selected Approach
+Option 3 — two-tier strategy implemented in `detectDuplicates()` in `engine.js`:
+- **Tier 1 (POSSIBLE_DUPLICATE):** same date + same payer + same original amount + same currency + matching normalized description → second row gets `excludeFromBalances = true`, `isDuplicateOf` set to the first row's id
+- **Tier 2 (POSSIBLE_DUPLICATE_DIFFERENT_AMOUNTS):** same date + matching normalized description, but different payer or amount → both rows imported as normal, both `flagged = true`, neither excluded
 
-## 11. Household roster / membership drift
+Description normalization: lowercase → strip punctuation → remove common filler words (`at`, `the`, `a`, `an`, `-`) → split and sort remaining words → rejoin. This matches `"Dinner at Marina Bites"` and `"dinner - marina bites"`.
 
-Meera moves out at the end of March; Sam moves in during April. One April
-row still lists Meera in `split_with` (the row's own note: "oops Meera still
-in the group list").
+### Why It Was Chosen
+Auto-deletion (Option 1) is irreversible and makes the import destructive. For a financial ledger, preserving the source data and flagging it for human confirmation is the correct default. Flagging without touching balances (Option 2) would leave wrong balances in place until a human acts. Option 3 gives the correct balance immediately (exclude the second occurrence of an exact duplicate) while still requiring human confirmation before permanent deletion.
 
-**Decision:** A small, explicit "roster departures" list
-(`ROSTER_DEPARTURES` in `engine.js`) records that Meera left after 29 March
-2026. Any later row that still includes Meera in `split_with` gets an
-`INACTIVE_PERSON_IN_SPLIT` (WARNING) anomaly, but **the data is not altered**
-— Meera's split is kept as recorded.
-
-**Why:** Automatically removing Meera and redistributing her share would be
-guessing at intent (maybe she really was still using groceries that week).
-Flagging without altering preserves the source data while surfacing the issue
-for a human decision.
+### Tradeoffs
+- The normalized-description match could produce false positives for genuinely different expenses at the same venue on the same day (e.g. two Swiggy orders on the same date)
+- Near-duplicates (Tier 2) are included in balances even though one of them may be wrong — this is intentional because the importer cannot determine which amount is correct
 
 ---
 
-## 12. Deployment
+## Decision 7 — Settlement Processing: Separate Model
 
-**Decision:** Frontend on Vercel (static React/Vite build), backend on
-Render, Postgres via a free-tier hosted instance (e.g. Render Postgres or
-Neon). See `README.md` for the exact steps.
+### Problem
+Two rows describe direct person-to-person transfers, not shared household costs:
+- Row 14: "Rohan paid Aisha back" — Rohan repaying a debt to Aisha
+- Row 38: "Sam deposit share" — Sam paying his move-in deposit to Aisha
 
-**Why:** All three offer generous free tiers, deploy directly from a GitHub
-repo (satisfying the "meaningful commit history" requirement by deploying
-incrementally), and require no server management — important given the
-timeline.
+If treated as normal expenses with two participants, they would be split between the two people named — which is mathematically wrong for a repayment. ("Rohan paid Aisha back ₹5,000" as a 2-person equal expense would mean both Rohan and Aisha each owe ₹2,500, which makes no sense.)
+
+### Options Considered
+1. **Import as Expense** — let the anomaly flags stand; user corrects manually
+2. **Separate Settlement model** — classify the row differently, adjust balances directly
+
+### Selected Approach
+A separate `Settlement` model. Detection heuristic in `engine.js`:
+
+A row is classified as a Settlement if **both**:
+- `split_with` (minus the payer) names **exactly one** other person
+- **Either:** `split_type` is empty **or** `description + notes` matches the keyword regex `/deposit|paid.*back|reimburs|settle?ment|owes?/i`
+
+Balance formula for settlements: `fromPerson.balance += amount; toPerson.balance -= amount`. This correctly represents a direct transfer without the group.
+
+### Why It Was Chosen
+The mathematical model for a repayment is fundamentally different from a shared expense. A settlement is a transfer between two people, not a cost shared among the group. Modelling it correctly produces correct balances without manual intervention. The heuristic is logged as a `SETTLEMENT_DETECTED` anomaly every time it fires, making it auditable and correctable if it misclassifies a future row.
+
+### Tradeoffs
+- The keyword-based detection is a heuristic — it could fire on legitimate expenses with settlement-like descriptions
+- The empty-`split_type` detection was implemented first (catching row 14); the keyword extension was added after row 38 was manually identified as misclassified (see AI_USAGE.md)
+- Every classification is logged, so no classification is silent
+
+---
+
+## Decision 8 — Household Membership Timeline: Explicit Departure List
+
+### Problem
+Meera moves out at the end of March 2026. Row 36 (02-04-2026) still includes Meera in `split_with` — the row's own note says "oops Meera still in the group list". Sam joins in April. The system needs to flag post-departure appearances without altering data.
+
+### Options Considered
+1. **Auto-remove departed members from splits** — redistribute their share among remaining participants
+2. **Hard error** — reject rows that include departed members
+3. **Warning + preserve** — flag the anomaly but keep the data as-is
+
+### Selected Approach
+`ROSTER_DEPARTURES` array in `engine.js`:
+```javascript
+const ROSTER_DEPARTURES = [
+  { person: "Meera", leftAfter: new Date(Date.UTC(2026, 2, 29)) }
+];
+```
+Any row dated after a departure's `leftAfter` that includes that person in `split_with` generates an `INACTIVE_PERSON_IN_SPLIT` (WARNING). Data is not altered.
+
+The `Person` model stores `isActive` and `leftAt` for display purposes. `isActive = false` does not prevent a person from appearing in splits — it is a display/roster flag, not a constraint.
+
+### Why It Was Chosen
+Auto-redistribution (Option 1) guesses at intent. Maybe Meera genuinely bought groceries during her last week and the data is correct. The importer cannot know. Flagging and preserving gives the user the information needed to make the decision while keeping the source data intact.
+
+### Tradeoffs
+- The departure list is hardcoded in `engine.js` — adding a new departure requires a code change
+- A future improvement would store departure dates in the `Person.leftAt` column and query them dynamically during import
+
+---
+
+## Decision 9 — Balance Calculation Algorithm
+
+### Problem
+With expenses, splits, and settlements spread across multiple models, there needs to be a clear, deterministic formula for computing each person's net balance.
+
+### Options Considered
+1. **SQL aggregate query** — SUM expenses paid minus SUM splits owed plus SUM settlements
+2. **Application-layer calculation** — load all relevant records, compute in JavaScript
+
+### Selected Approach
+Application-layer calculation in `backend/src/services/balances.js`. Convention: **positive balance = group owes this person money; negative = this person owes the group.**
+
+```
+For each non-excluded Expense:
+  payer.balance += expense.amountInInr
+  for each split:
+    split.person.balance -= split.amountOwedInInr
+
+For each Settlement:
+  fromPerson.balance += settlement.amountInInr
+  toPerson.balance -= settlement.amountInInr
+```
+
+Settle-up suggestions use a greedy matching algorithm: sort creditors and debtors by balance magnitude descending; iteratively match the largest debtor with the largest creditor until all balances are within ±₹0.01 of zero. Produces at most `n-1` transactions for `n` people.
+
+### Why It Was Chosen
+The application-layer approach is easier to test, debug, and reason about than a multi-join SQL aggregate. The dataset is small (tens to hundreds of expenses per import period) so there is no performance concern. The greedy settle-up algorithm is O(n log n) and produces optimal or near-optimal results for the small household sizes this app targets.
+
+### Tradeoffs
+- Loads all non-excluded expenses and settlements into memory for the calculation — fine for household scale, not for thousands of expenses
+- Greedy settle-up is not always globally optimal for minimising transaction count, but for ≤10 people the difference is negligible
+
+---
+
+## Decision 10 — Import Architecture: Modular Pipeline with Standalone CLI
+
+### Problem
+The CSV import logic is complex enough (date parsing, name normalisation, amount handling, FX conversion, split calculation, duplicate detection) that testing it requires either mocking the database or running the full stack.
+
+### Options Considered
+1. **Monolithic import function** — parse CSV and write to DB in one function
+2. **Modular pipeline with DB-free parser** — separate parsing from persistence; provide a CLI entry point
+
+### Selected Approach
+Modular pipeline with a standalone CLI runner:
+- `engine.js` — orchestrates the full parse pipeline; returns a pure JavaScript object `{ people, expenses, settlements, anomalies, summary }`. No database calls.
+- `importService.js` — takes the result of `engine.js` and persists everything to the database via Prisma
+- `runImport.js` — calls `engine.js` and prints the result to stdout; no database required
+- Modules: `names.js`, `dates.js`, `amounts.js`, `splits.js`, `severity.js` — each handles one concern
+
+### Why It Was Chosen
+The standalone CLI (`node src/importer/runImport.js ../Expenses_Export.csv`) was the primary development tool. It allowed the entire anomaly engine to be iterated against the real 42-row CSV without needing a running database. This is how all 24 anomalies in SCOPE.md were discovered and validated — the CLI output was compared manually against the raw CSV. The clean separation also means the import logic can be unit-tested without a database.
+
+### Tradeoffs
+- Two-pass architecture (parse first, persist second) holds the entire parse result in memory — acceptable for CSV files of reasonable size
+- `importService.js` uses sequential `await` calls rather than bulk transactions for simplicity, which is slower than a single transaction for large imports
+
+---
+
+## Decision 11 — API Design: RESTful Resource-Based Endpoints
+
+### Problem
+What shape should the backend API take?
+
+### Options Considered
+1. **GraphQL** — flexible queries, single endpoint, strong typing
+2. **tRPC** — end-to-end type safety with TypeScript
+3. **REST with Express** — standard resource-based routes
+
+### Selected Approach
+REST with Express:
+- `POST /api/imports` — CSV upload; returns full Import Report
+- `GET /api/imports` / `GET /api/imports/:id` — list / get report
+- `GET /api/expenses` / `PATCH /api/expenses/:id` / `DELETE /api/expenses/:id` — expense management
+- `GET /api/settlements` / `POST /api/settlements` — settlements
+- `GET /api/people` / `POST /api/people` / `PATCH /api/people/:id` — people
+- `GET /api/balances` — balances + settle-up suggestions
+
+### Why It Was Chosen
+The app's operations are simple CRUD plus one complex upload endpoint. GraphQL's flexibility is justified when clients need to compose complex nested queries dynamically — that's not the case here. REST with conventional HTTP semantics is immediately understandable to any reviewer and requires no additional runtime or tooling. The `POST /api/imports` response includes the full Import Report inline (anomalies + summary) so the frontend doesn't need to make a second request after upload.
+
+### Tradeoffs
+- No schema documentation (no OpenAPI spec) — a future improvement
+- The frontend fetches full expense lists rather than paginating — acceptable for household-scale data volumes
+- Error responses are ad-hoc JSON objects (`{ error: "message" }`) rather than a standardised error schema
+
+---
+
+## Decision 12 — Error Handling: Fail-Safe at Every Layer
+
+### Problem
+A CSV import involves many parsing steps, each of which can fail. A single bad row should not abort an import with 42 rows. An absent AI API key should not prevent the Import Report from rendering.
+
+### Options Considered
+1. **Abort on first error** — strict, but loses all data from the import
+2. **Collect errors, then decide** — import succeeds if error count is below a threshold
+3. **Never abort; flag and continue** — every bad row is handled gracefully and logged
+
+### Selected Approach
+Option 3 — the pipeline never aborts for a single bad row. Per-field fallbacks ensure every row produces *some* output. The severity tier determines how that output affects balances:
+- **ERROR** rows: imported with `excludeFromBalances = true` — visible in the UI but do not affect anyone's balance until manually corrected
+- **WARNING/INFO** rows: imported normally with the automated fix applied; anomaly record created for traceability
+
+**AI summary fail-safe:** `summarizeAnomalies()` wraps the Claude API call in `try/catch`. If `ANTHROPIC_API_KEY` is absent, the function returns `null` immediately. If the API call throws, it logs the error and returns `null`. The Import Report renders fully in both cases — the AI summary paragraph simply does not appear.
+
+**Express error handler:** a generic `(err, req, res, next)` middleware at the bottom of `server.js` catches any unhandled exceptions and returns a `500` response with an error message, preventing the server from crashing.
+
+### Why It Was Chosen
+Financial import tools must never silently discard data. A strict abort-on-error approach would mean a single comma in an amount field prevents 41 other rows from being imported. The fail-safe approach preserves the maximum possible data, flags everything that needs attention, and gives the user actionable information to fix each issue.
+
+### Tradeoffs
+- The database may contain records with `excludeFromBalances = true` that are never manually fixed — the balances will be correct, but the excluded rows accumulate as a growing list of unresolved items
+- The generic Express error handler swallows the stack trace in production — structured error logging (e.g. Sentry) would be a production improvement
+

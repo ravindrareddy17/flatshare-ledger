@@ -3,3 +3,14 @@
 **/.env
 *.log
 backend/generated/
+
+# SQLite database (each dev runs `prisma migrate dev` locally)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
