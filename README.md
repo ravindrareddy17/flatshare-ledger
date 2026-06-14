@@ -2,7 +2,7 @@
 
 A production-quality shared-expense tracker built for the **Spreetail Software Developer Internship** take-home assignment. Upload a messy household expenses CSV, receive a structured **Import Report** cataloguing every data-quality issue found and the automated resolution applied, then track per-person balances and suggested settle-up transactions.
 
-- **Live app:** _add your deployed URL here_
+- **Live app:** https://flatshare-ledger.vercel.app/
 - **GitHub:** _add your repository URL here_
 
 > See also:
