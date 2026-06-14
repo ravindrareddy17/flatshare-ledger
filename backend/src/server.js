@@ -12,7 +12,22 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
-app.get("/api/health", (req, res) => res.json({ status: "ok" }));
+app.get("/", (req, res) => res.json({
+  name: "Flatshare Ledger API",
+  status: "running",
+  version: "1.0.0",
+  endpoints: {
+    health:      "GET  /api/health",
+    imports:     "GET  /api/imports",
+    uploadCsv:   "POST /api/imports",
+    expenses:    "GET  /api/expenses",
+    settlements: "GET  /api/settlements",
+    people:      "GET  /api/people",
+    balances:    "GET  /api/balances",
+  }
+}));
+
+app.get("/api/health", (req, res) => res.json({ status: "ok", timestamp: new Date().toISOString() }));
 
 app.use("/api", importsRouter);
 app.use("/api", expensesRouter);
