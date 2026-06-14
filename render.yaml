@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: flatshare-ledger-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && node scripts/deploy-db.js
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PORT
+        value: 4000
+      - key: NODE_ENV
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
